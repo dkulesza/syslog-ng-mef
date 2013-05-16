@@ -1,0 +1,173 @@
+/*
+ * Copyright (c) 2002-2012 BalaBit IT Ltd, Budapest, Hungary
+ * Copyright (c) 1998-2012 Balázs Scheidler
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 as published
+ * by the Free Software Foundation, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ *
+ * As an additional exemption you are allowed to compile & link against the
+ * OpenSSL libraries as published by the OpenSSL project. See the file
+ * COPYING for details.
+ *
+ */
+
+%code top {
+#include "afmef-parser.h"
+
+}
+
+
+%code {
+
+#include "afmef.h"
+#include "afmef-dest.h"
+#include "cfg-parser.h"
+#include "afmef-grammar.h"
+#include "messages.h"
+#include "syslog-names.h"
+#include "plugin.h"
+
+
+static SocketOptions *last_sock_options;
+static gint last_addr_family = AF_INET;
+
+}
+
+%name-prefix "afmef_"
+
+/* this parameter is needed in order to instruct bison to use a complete
+ * argument list for yylex/yyerror */
+
+%lex-param {CfgLexer *lexer}
+%parse-param {CfgLexer *lexer}
+%parse-param {LogDriver **instance}
+%parse-param {gpointer arg}
+
+%token KW_MEF
+%token KW_NETWORK
+%token KW_TRANSPORT
+%token KW_IP_PROTOCOL
+
+%token KW_IP_TTL
+%token KW_SO_BROADCAST
+%token KW_IP_TOS
+%token KW_SO_SNDBUF
+%token KW_SO_RCVBUF
+%token KW_SO_KEEPALIVE
+%token KW_TCP_KEEPALIVE_TIME
+%token KW_TCP_KEEPALIVE_PROBES
+%token KW_TCP_KEEPALIVE_INTVL
+%token KW_SPOOF_SOURCE
+
+%token KW_KEEP_ALIVE
+%token KW_MAX_CONNECTIONS
+
+%token KW_LOCALIP
+%token KW_IP
+%token KW_LOCALPORT
+%token KW_DESTPORT
+
+%type	<ptr> dest_afmef
+%type	<ptr> dest_afmef_tcp_params
+
+%type   <num> afinet_ip_protocol_option
+
+%%
+
+start
+        : LL_CONTEXT_DESTINATION dest_mef                  { YYACCEPT; }
+        ;
+
+afinet_ip_protocol_option
+        : LL_NUMBER
+        {
+          CHECK_ERROR($1 == 4 || $1 == 6, @1, "ip-protocol option can only be 4 or 6!");
+          if ($1 == 4)
+            {
+              $$ = AF_INET;
+            }
+          else
+            {
+              $$ = AF_INET6;
+            }
+        }
+        ;
+
+dest_afinet_ip_protocol
+        : KW_IP_PROTOCOL '(' afinet_ip_protocol_option ')' { ((AFSocketDestDriver *)last_driver)->address_family = $3; }
+        ;
+        
+dest_afmef
+	: KW_MEF { last_addr_family = AF_INET; } '(' dest_mef_tcp_params ')'			{ $$ = $4; }
+	;
+
+dest_afinet_option
+	: KW_LOCALIP '(' string ')'		{ afmef_dd_set_localip(last_driver, $3); free($3); }
+	| KW_PORT '(' string_or_number ')'	{ afmef_dd_set_destport(last_driver, $3); free($3); }
+	| KW_DESTPORT '(' string_or_number ')'	{ afmef_dd_set_destport(last_driver, $3); free($3); }
+	| inet_socket_option
+	| dest_writer_option
+	| dest_afinet_option
+	| dest_driver_option
+	;
+
+dest_afinet_tcp_params
+	: string
+	  {
+	    last_driver = *instance = afmef_dd_new(last_addr_family, SOCK_STREAM, $1);
+	    free($1);
+	    last_writer_options = &((AFSocketDestDriver *) last_driver)->writer_options;
+	    last_sock_options = &((AFSocketDestDriver *) last_driver)->sock_options;
+	  }
+	  dest_afinet_tcp_options		{ $$ = last_driver; }
+	;
+
+dest_afinet_tcp_options
+	: dest_afinet_tcp_options dest_afinet_tcp_option
+	|
+	;
+
+dest_afinet_tcp_option
+	: dest_afinet_option
+	;
+
+dest_afinet_option
+        : KW_KEEP_ALIVE '(' yesno ')'        { afmef_dd_set_keep_alive(last_driver, $3); }
+        ;
+
+
+dest_afmef_transport
+        : KW_TRANSPORT '(' string ')'           { afmef_dd_set_transport(last_driver, $3); free($3); }
+        | KW_TRANSPORT '(' KW_MEF ')'           { afmef_dd_set_transport(last_driver, "tcp"); }
+	;
+
+
+socket_option
+	: KW_SO_SNDBUF '(' LL_NUMBER ')'            { last_sock_options->so_sndbuf = $3; }
+	| KW_SO_RCVBUF '(' LL_NUMBER ')'            { last_sock_options->so_rcvbuf = $3; }
+	| KW_SO_BROADCAST '(' yesno ')'             { last_sock_options->so_broadcast = $3; }
+	| KW_SO_KEEPALIVE '(' yesno ')'             { last_sock_options->so_keepalive = $3; }
+	;
+
+inet_socket_option
+	: socket_option
+	| KW_IP_TTL '(' LL_NUMBER ')'               { ((InetSocketOptions *) last_sock_options)->ip_ttl = $3; }
+	| KW_IP_TOS '(' LL_NUMBER ')'               { ((InetSocketOptions *) last_sock_options)->ip_tos = $3; }
+	| KW_TCP_KEEPALIVE_TIME '(' LL_NUMBER ')'   { ((InetSocketOptions *) last_sock_options)->tcp_keepalive_time = $3; }
+	| KW_TCP_KEEPALIVE_INTVL '(' LL_NUMBER ')'  { ((InetSocketOptions *) last_sock_options)->tcp_keepalive_intvl = $3; }
+	| KW_TCP_KEEPALIVE_PROBES '(' LL_NUMBER ')' { ((InetSocketOptions *) last_sock_options)->tcp_keepalive_probes = $3; }
+	;
+
+/* INCLUDE_RULES */
+
+%%
